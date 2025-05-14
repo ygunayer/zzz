@@ -82,3 +82,9 @@ int main(int argc, const char** argv) {
   });
 }
 ```
+
+## Thanks
+This project was inspired by other similar projects such as
+- [Sokol](https://github.com/floooh/sokol)
+- [SDL](https://github.com/libsdl-org/SDL/)
+- [GLFW](https://github.com/glfw/glfw)

@@ -11,13 +11,23 @@ bool on_window_before_close(zap_window_t window) {
   return true;
 }
 
+void on_event(zap_event_t event) {
+  if (event.type == ZAP_EVENT_KEY_DOWN &&
+      event.keycode == ZAP_KEYCODE_W &&
+      event.keymod == ZAP_KEYMOD_CTRL
+  ) {
+    printf("Got Ctrl+W, closing window %d\n", event.window);
+    zap_window_request_close(event.window);
+  }
+}
+
 bool on_after_init(zap_options_t options) {
   (void)options; // stop the compiler from complaining about the unused variable
   return zap_window_create((zap_window_options_t) {
     .width = 1366,
     .height = 768,
     .centered = true,
-    .title = "zap test",
+    .title = "zap example - hit Ctrl+W to close",
     .user_data = (void*)"my user data",
     .on_before_close = on_window_before_close,
   });
@@ -26,5 +36,6 @@ bool on_after_init(zap_options_t options) {
 int main(int argc, const char** argv) {
   return zap_main(argc, argv, (zap_options_t) {
     .on_after_init = on_after_init,
+    .on_event = on_event,
   });
 }
