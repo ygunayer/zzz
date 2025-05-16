@@ -26,7 +26,7 @@ bool on_after_init(zap_options_t options) {
   return zap_window_create((zap_window_options_t) {
     .width = 1366,
     .height = 768,
-    .centered = true,
+    .position = ZAP_WINDOW_POSITION_CENTERED,
     .title = "zap example - hit Ctrl+W to close",
     .user_data = (void*)"my user data",
     .on_before_close = on_window_before_close,
