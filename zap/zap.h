@@ -1,6 +1,7 @@
 #ifndef _ZAP_H_
 #define _ZAP_H_
 
+#include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -8,6 +9,11 @@
 #if defined(_WIN32) || defined(_WIN64)
   #define _ZAP_WINDOWS
   #include <Windows.h>
+#elif defined(__linux__)
+  #define _ZAP_X11
+  #include <X11/Xlib.h>
+  #include <X11/X.h>
+  #include <X11/Xatom.h>
 #endif
 
 // User and built-in defines
@@ -281,10 +287,10 @@ ZAP_API void* zap_window_get_user_data(zap_window_t window);
 
 #if defined(_ZAP_WINDOWS)
 ZAP_API HWND zap_window_get_hwnd(zap_window_t window);
-#endif
+#else
 
 // Internal implementation
-// #define ZAP_IMPL
+#define ZAP_IMPL
 #if defined(ZAP_IMPL)
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,6 +353,10 @@ static struct ZAP {
 #if defined(_ZAP_WINDOWS)
   HINSTANCE hinstance;
   WNDCLASSEX wndclass;
+#elif defined(_ZAP_X11)
+  Atom xwm_delete_window;
+  Window xroot_window;
+  Display* xdisplay;
 #endif
 
   zap_keycode_t keycodes[512];
@@ -372,6 +382,8 @@ _ZAP_INTERNAL _zap_display_entry_t* _zap_window_get_display(_zap_window_entry_t*
 _ZAP_INTERNAL void _zap_windows_init(void);
 LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprect, LPARAM dwdata);
+#elif defined(_ZAP_X11)
+bool _zap_x11_handle_events(void);
 #endif
 
 ZAP_API int zap_main(int argc, const char** argv, zap_options_t options) {
@@ -402,12 +414,12 @@ ZAP_API bool zap_init(zap_options_t options) {
 
   ZAP.next_window_id = 1;
   ZAP.window_cap = 16;
-  ZAP.windows = malloc(sizeof(_zap_window_entry_t) * ZAP.window_cap);
+  ZAP.windows = (_zap_window_entry_t*)malloc(sizeof(_zap_window_entry_t) * ZAP.window_cap);
   memset(ZAP.windows, 0, sizeof(_zap_window_entry_t) * ZAP.window_cap);
 
   ZAP.next_display_id = 1;
   ZAP.display_cap = 16;
-  ZAP.displays = malloc(sizeof(_zap_display_entry_t) * ZAP.display_cap);
+  ZAP.displays = (_zap_display_entry_t*)malloc(sizeof(_zap_display_entry_t) * ZAP.display_cap);
   memset(ZAP.displays, 0, sizeof(_zap_display_entry_t) * ZAP.display_cap);
 
 #if defined(_ZAP_WINDOWS)
@@ -481,23 +493,8 @@ ZAP_API void zap_run_loop(void) {
 #endif
 
   while (ZAP.window_count > 0) {
-#if defined(_ZAP_LINUX)
-    while (XPending(ZAP.xdisplay)) {
-      XNextEvent(ZAP.xdisplay, &xevent);
-
-      switch(xevent.type) {
-        case ClientMessage: {
-          if (xevent.xclient.data.l[0] == ZAP.xwm_delete_window) {
-            for (size_t i = 0; i < ZAP.window_count; ++i) {
-              ZAPWindow* window = &ZAP.windows[i];
-              if (window->xwindow == xevent.xclient.window) {
-                ids_to_close[num_pending_close++] = window->id;
-              }
-            }
-          }
-        } break;
-      }
-    }
+#if defined(_ZAP_X11)
+    _zap_x11_handle_events();
 #elif defined(_ZAP_WINDOWS)
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
       TranslateMessage(&msg);
@@ -531,15 +528,15 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
       .height = options.height,
     },
     .on_after_create = options.on_after_create,
+    .on_render = options.on_render,
     .on_before_close = options.on_before_close,
     .on_before_destroy = options.on_before_destroy,
-    .on_render = options.on_render,
     .user_data = options.user_data,
   };
 
-  char* title = options.title == NULL ? "zap" : options.title;
+  char* title = options.title == NULL ? (char*)"zap" : options.title;
 
-#if defined(_ZAP_LINUX)
+#if defined(_ZAP_X11)
   assert(ZAP.xdisplay != NULL);
 
   int attr_mask = CWBackPixel | CWEventMask;
@@ -603,7 +600,7 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
     while (ZAP.window_count >= ZAP.window_cap) {
       ZAP.window_cap *= 2;
     }
-    ZAP.windows = realloc(ZAP.windows, sizeof(_zap_window_entry_t) * ZAP.window_cap);
+    ZAP.windows = (_zap_window_entry_t*)realloc(ZAP.windows, sizeof(_zap_window_entry_t) * ZAP.window_cap);
   }
 
   ZAP.windows[ZAP.window_count] = window;
@@ -1135,6 +1132,28 @@ BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprec
 }
 
 #undef ZAP_IMPL
+#endif
+
+#if defined(_ZAP_X11)
+_ZAP_INTERNAL bool _zap_x11_handle_events(void) {
+  XEvent xevent = {0};
+  while (XPending(ZAP.xdisplay)) {
+    XNextEvent(ZAP.xdisplay, &xevent);
+
+    switch(xevent.type) {
+      case ClientMessage: {
+        if (xevent.xclient.data.l[0] == ZAP.xwm_delete_window) {
+          for (size_t i = 0; i < ZAP.window_count; ++i) {
+            ZAPWindow* window = &ZAP.windows[i];
+            if (window->xwindow == xevent.xclient.window) {
+              ids_to_close[num_pending_close++] = window->id;
+            }
+          }
+        }
+      } break;
+    }
+  }
+}
 #endif
 
 #endif
