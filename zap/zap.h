@@ -1,6 +1,7 @@
 #ifndef _ZAP_H_
 #define _ZAP_H_
 
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,8 +13,10 @@
 #elif defined(__linux__)
   #define _ZAP_X11
   #include <X11/Xlib.h>
-  #include <X11/X.h>
   #include <X11/Xatom.h>
+  #include <X11/Xutil.h>
+  #include <X11/keysymdef.h>
+  #include <X11/extensions/Xrandr.h>
 #endif
 
 // User and built-in defines
@@ -287,10 +290,9 @@ ZAP_API void* zap_window_get_user_data(zap_window_t window);
 
 #if defined(_ZAP_WINDOWS)
 ZAP_API HWND zap_window_get_hwnd(zap_window_t window);
-#else
+#endif
 
 // Internal implementation
-#define ZAP_IMPL
 #if defined(ZAP_IMPL)
 #include <stdio.h>
 #include <stdlib.h>
@@ -302,6 +304,15 @@ ZAP_API HWND zap_window_get_hwnd(zap_window_t window);
     assert(ZAP.inited); \
     for (size_t i = 0; i < ZAP.window_count; ++i) { \
       _zap_window_entry_t* it = &ZAP.windows[i]; \
+      x \
+    } \
+  } while (0)
+
+#define _ZAP_DISPLAYS_FOREACH(x) \
+  do { \
+    assert(ZAP.inited); \
+    for (size_t i = 0; i < ZAP.display_count; ++i) { \
+      _zap_display_entry_t* it = &ZAP.displays[i]; \
       x \
     } \
   } while (0)
@@ -321,6 +332,8 @@ typedef struct {
   bool close_requested;
 #if defined(_ZAP_WINDOWS)
   HWND hwnd;
+#elif defined(_ZAP_X11)
+  Window xwindow;
 #endif
   ZapWindowCreateCallback on_after_create;
   ZapWindowRenderCallback on_render;
@@ -334,6 +347,8 @@ typedef struct _zap_display_entry_t {
   zap_recti_t rect;
 #if defined(_ZAP_WINDOWS)
   HMONITOR hmonitor;
+#elif defined(_ZAP_X11)
+  char* x11_display_name;
 #endif
 } _zap_display_entry_t;
 
@@ -354,7 +369,8 @@ static struct ZAP {
   HINSTANCE hinstance;
   WNDCLASSEX wndclass;
 #elif defined(_ZAP_X11)
-  Atom xwm_delete_window;
+  Atom xa_wm_delete_window;
+  Atom xa_window_id;
   Window xroot_window;
   Display* xdisplay;
 #endif
@@ -377,13 +393,19 @@ _ZAP_INTERNAL void _zap_window_center_on_screen(_zap_window_entry_t* window);
 _ZAP_INTERNAL inline _zap_window_entry_t* _zap_findow_find(zap_window_t id);
 _ZAP_INTERNAL inline void _zap_window_refresh_size(_zap_window_entry_t* window);
 _ZAP_INTERNAL _zap_display_entry_t* _zap_window_get_display(_zap_window_entry_t* window);
+_ZAP_INTERNAL void _zap_display_destroy(_zap_display_entry_t* display);
 
 #if defined(_ZAP_WINDOWS)
-_ZAP_INTERNAL void _zap_windows_init(void);
+_ZAP_INTERNAL bool _zap_windows_init(void);
 LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprect, LPARAM dwdata);
 #elif defined(_ZAP_X11)
-bool _zap_x11_handle_events(void);
+_ZAP_INTERNAL bool _zap_x11_init(void);
+_ZAP_INTERNAL void _zap_x11_handle_events(void);
+_ZAP_INTERNAL bool _zap_x11_refresh_displays(void);
+_ZAP_INTERNAL void _zap_x11_upsert_display(XRROutputInfo* output_info, XRRCrtcInfo* crtc_info);
+_ZAP_INTERNAL zap_window_t _zap_x11_get_window(Window window);
+_ZAP_INTERNAL _zap_window_entry_t* _zap_x11_find_window_entry(Window window);
 #endif
 
 ZAP_API int zap_main(int argc, const char** argv, zap_options_t options) {
@@ -423,31 +445,15 @@ ZAP_API bool zap_init(zap_options_t options) {
   memset(ZAP.displays, 0, sizeof(_zap_display_entry_t) * ZAP.display_cap);
 
 #if defined(_ZAP_WINDOWS)
-  HINSTANCE hinstance = GetModuleHandle(NULL);
-  if (hinstance == NULL) {
+  if (!_zap_windows_init()) {
     return false;
   }
-
-  WNDCLASSEX wndclass = {
-    .cbSize = sizeof(WNDCLASSEX),
-    .lpfnWndProc = ZapWndProc,
-    .hInstance = hinstance,
-    .lpszClassName = _ZAP_WINDOWS_WNDCLASS,
-    .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC
-    // .hIcon = LoadIcon(NULL, IDI_APPLICATION),
-    // .hIconSm = LoadIcon(NULL, IDI_APPLICATION),
-    // .hCursor = LoadCursor(NULL, IDC_ARROW),
-  };
-
-  if (!RegisterClassEx(&wndclass)) {
+#elif defined(_ZAP_X11)
+  if (!_zap_x11_init()) {
     return false;
   }
-
-  ZAP.hinstance = hinstance;
-  ZAP.wndclass = wndclass;
-
-  _zap_windows_init();
 #endif
+
   ZAP.inited = true;
   if (!_zap_refresh_displays()) {
     return false;
@@ -466,7 +472,7 @@ ZAP_API void zap_destroy(void) {
     ZAP.on_before_destroy();
   }
 
-  if (ZAP.windows != NULL) {
+  if (ZAP.windows) {
     _ZAP_WINDOWS_FOREACH({
       _zap_window_destroy(it);
     });
@@ -475,14 +481,23 @@ ZAP_API void zap_destroy(void) {
     ZAP.windows = NULL;
   }
 
-  if (ZAP.windows != NULL) {
-    _ZAP_WINDOWS_FOREACH({
-      _zap_window_destroy(it);
+  if (ZAP.displays) {
+    _ZAP_DISPLAYS_FOREACH({
+      _zap_display_destroy(it);
     });
-    free(ZAP.windows);
-    ZAP.window_count = 0;
-    ZAP.windows = NULL;
+    free(ZAP.displays);
+    ZAP.display_count = 0;
+    ZAP.displays = NULL;
   }
+
+#if defined(_ZAP_WINDOWS)
+  // TODO cleanup
+#elif defined(_ZAP_X11)
+  if (ZAP.xdisplay) {
+    XCloseDisplay(ZAP.xdisplay);
+    ZAP.xdisplay = NULL;
+  }
+#endif
 }
 
 ZAP_API void zap_run_loop(void) {
@@ -534,44 +549,10 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
     .user_data = options.user_data,
   };
 
-  char* title = options.title == NULL ? (char*)"zap" : options.title;
+  char* title = options.title ? (char*)"zap" : options.title;
 
-#if defined(_ZAP_X11)
-  assert(ZAP.xdisplay != NULL);
-
-  int attr_mask = CWBackPixel | CWEventMask;
-  XSetWindowAttributes attrs = {0};
-  attrs.background_pixel = 0x00000000;
-  attrs.event_mask =
-    StructureNotifyMask |
-    KeyPressMask |
-    KeyReleaseMask |
-    ExposureMask;
-
-  Window xwindow = XCreateWindow(
-    ZAP.xdisplay,
-    ZAP.xroot_window,
-    0, 0,
-    width, height,
-    0, CopyFromParent, CopyFromParent, CopyFromParent,
-    attr_mask, &attrs
-  );
-
-  XMapWindow(ZAP.xdisplay, xwindow);
-  window.xwindow = xwindow;
-
-  XStoreName(ZAP.xdisplay, xwindow, title);
-  XSetWMProtocols(ZAP.xdisplay, xwindow, &ZAP.xwm_delete_window, 1);
-
-  XWindowAttributes out_attr = {0};
-  XGetWindowAttributes(ZAP.xdisplay, xwindow, &out_attr);
-
-  window.w = out_attr.width;
-  window.h = out_attr.height;
-  window.x = out_attr.x;
-  window.y = out_attr.y;
-#elif defined(_ZAP_WINDOWS)
-  assert(ZAP.hinstance != NULL);
+#if defined(_ZAP_WINDOWS)
+  assert(ZAP.hinstance);
 
   HWND hwnd = CreateWindowEx(
     WS_EX_CLIENTEDGE,
@@ -588,12 +569,57 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
     NULL
   );
 
-  if (hwnd == NULL) {
+  if (!hwnd) {
     return 0;
   }
 
   SetWindowLongPtrW(hwnd, GWLP_USERDATA, window.id);
   window.hwnd = hwnd;
+#elif defined(_ZAP_X11)
+  assert(ZAP.xdisplay);
+
+  XSetWindowAttributes attrs = {0};
+  attrs.background_pixel = 0x00000000;
+  attrs.event_mask =
+    StructureNotifyMask |
+    KeyPressMask |
+    KeyReleaseMask |
+    ExposureMask;
+
+  Window xwindow = XCreateWindow(
+    ZAP.xdisplay,
+    ZAP.xroot_window,
+    0, 0,
+    options.width, options.height,
+    InputOutput,
+    CopyFromParent,
+    CopyFromParent,
+    CopyFromParent,
+    CWBackPixel | CWEventMask,
+    &attrs
+  );
+
+  window.xwindow = xwindow;
+
+  XStoreName(ZAP.xdisplay, xwindow, title);
+  XSetWMProtocols(ZAP.xdisplay, xwindow, &ZAP.xa_wm_delete_window, 1);
+
+  unsigned char window_id_prop_val[1] = {0};
+  window_id_prop_val[0] = window.id;
+
+  XChangeProperty(
+    ZAP.xdisplay,
+    xwindow,
+    ZAP.xa_window_id,
+    XA_INTEGER,
+    sizeof(zap_window_t) * 8,
+    PropModeReplace,
+    window_id_prop_val,
+    1
+  );
+
+  XFlush(ZAP.xdisplay);
+
 #endif
 
   if (ZAP.window_count >= ZAP.window_cap) {
@@ -616,6 +642,13 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
           if (GetWindowRect(hwnd, &rect)) {
             _zap_window_move_to(&window, rect.left, rect.top, options.width, options.height);
           }
+#elif defined(_ZAP_X11)
+          XSizeHints size_hints = {
+            .width = options.width,
+            .height = options.height,
+            .flags = PSize,
+          };
+          XSetWMNormalHints(ZAP.xdisplay, xwindow, &size_hints);
 #endif
         } break;
 
@@ -637,6 +670,8 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
 #if defined(_ZAP_WINDOWS)
   ShowWindow(hwnd, SW_SHOW);
   DragAcceptFiles(hwnd, TRUE);
+#elif defined(_ZAP_X11)
+  XMapWindow(ZAP.xdisplay, xwindow);
 #endif
 
   return window.id;
@@ -644,7 +679,7 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
 
 ZAP_API zap_window_display_mode_t zap_window_get_display_mode(zap_window_t window) {
   _zap_window_entry_t* win = _zap_findow_find(window);
-  if (win == NULL) {
+  if (!win) {
     return ZAP_DISPLAY_MODE_INVALID;
   }
   return win->display_mode;
@@ -652,7 +687,7 @@ ZAP_API zap_window_display_mode_t zap_window_get_display_mode(zap_window_t windo
 
 ZAP_API void zap_window_set_display_mode(zap_window_t window, zap_window_display_mode_t display_mode) {
   _zap_window_entry_t* win = _zap_findow_find(window);
-  if (win != NULL) {
+  if (win) {
     _zap_window_set_display_mode(win, display_mode);
   }
 }
@@ -660,7 +695,7 @@ ZAP_API void zap_window_set_display_mode(zap_window_t window, zap_window_display
 
 ZAP_API void zap_window_center_on_screen(zap_window_t window) {
   _zap_window_entry_t* win = _zap_findow_find(window);
-  if (win != NULL) {
+  if (win) {
     _zap_window_center_on_screen(win);
   }
 }
@@ -669,7 +704,7 @@ ZAP_API void zap_window_request_close(zap_window_t window) {
   assert(window != 0);
   _zap_window_entry_t* win = _zap_findow_find(window);
 
-  if (win == NULL || win->close_requested) {
+  if (!win || win->close_requested) {
     return;
   }
 
@@ -682,14 +717,14 @@ ZAP_API void zap_window_request_close(zap_window_t window) {
 
 ZAP_API void zap_window_set_user_data(zap_window_t window, void* user_data) {
   _zap_window_entry_t* win = _zap_findow_find(window);
-  if (win != NULL) {
+  if (win) {
     win->user_data = user_data;
   }
 }
 
 ZAP_API void* zap_window_get_user_data(zap_window_t window) {
   _zap_window_entry_t* win = _zap_findow_find(window);
-  if (win == NULL) {
+  if (!win) {
     return NULL;
   }
   return win->user_data;
@@ -698,15 +733,15 @@ ZAP_API void* zap_window_get_user_data(zap_window_t window) {
 #if defined(_ZAP_WINDOWS)
 ZAP_API HWND zap_window_get_hwnd(zap_window_t window) {
   _zap_window_entry_t* win = _zap_findow_find(window);
-  return win == NULL ? NULL : win->hwnd;
+  return !win ? NULL : win->hwnd;
 }
 #endif
 
 // Internal implementation
 _ZAP_INTERNAL void _zap_window_move_to(_zap_window_entry_t* window, int x, int y, int w, int h) {
-  assert(window != NULL);
+  assert(window);
 #if defined(_ZAP_WINDOWS)
-  if (window->hwnd != NULL) {
+  if (window->hwnd) {
     MoveWindow(window->hwnd, x, y, w, h, true);
 
     RECT new_rect = {0};
@@ -720,17 +755,20 @@ _ZAP_INTERNAL void _zap_window_move_to(_zap_window_entry_t* window, int x, int y
       rect->height = new_rect.bottom - new_rect.top;
     }
   }
+#elif defined(_ZAP_X11)
+  assert(ZAP.xdisplay);
+  XMoveResizeWindow(ZAP.xdisplay, window->xwindow, x, y, w, h);
 #endif
 }
 
 _ZAP_INTERNAL void _zap_window_set_display_mode(_zap_window_entry_t* window, zap_window_display_mode_t display_mode) {
-  assert(window != NULL);
+  assert(window);
   if (display_mode == ZAP_DISPLAY_MODE_INVALID) {
     return;
   }
 
   _zap_display_entry_t* display = _zap_window_get_display(window);
-  assert(display != NULL);
+  assert(display);
 
   switch (display_mode) {
     case ZAP_DISPLAY_MODE_FULLSCREEN: {
@@ -740,7 +778,7 @@ _ZAP_INTERNAL void _zap_window_set_display_mode(_zap_window_entry_t* window, zap
     case ZAP_DISPLAY_MODE_BORDERLESS_FULLSCREEN: {
       window->previous_rect = window->rect;
 #if defined(_ZAP_WINDOWS)
-      if (window->hwnd != NULL) {
+      if (window->hwnd) {
         SetWindowLong(window->hwnd, GWL_STYLE, 0);
         SetWindowPos(window->hwnd, HWND_TOP, display->rect.x, display->rect.y, display->rect.width, display->rect.height, SWP_FRAMECHANGED);
       }
@@ -778,10 +816,14 @@ _ZAP_INTERNAL inline void _zap_close_pending_windows(void) {
 
 _ZAP_INTERNAL bool _zap_refresh_displays(void) {
   assert(ZAP.inited);
-  assert(ZAP.displays != NULL);
+  assert(ZAP.displays);
 
 #if defined(_ZAP_WINDOWS)
   if (!EnumDisplayMonitors(NULL, NULL, ZapMonitorEnumProc, 0)) {
+    return false;
+  }
+#elif defined(_ZAP_X11)
+  if (!_zap_x11_refresh_displays()) {
     return false;
   }
 #endif
@@ -795,7 +837,7 @@ _ZAP_INTERNAL bool _zap_refresh_displays(void) {
 }
 
 _ZAP_INTERNAL void _zap_window_destroy(_zap_window_entry_t* window) {
-  if (window == NULL) {
+  if (!window) {
     return;
   }
 
@@ -804,17 +846,19 @@ _ZAP_INTERNAL void _zap_window_destroy(_zap_window_entry_t* window) {
   }
 
 #if defined(_ZAP_WINDOWS)
-  if (window->hwnd != NULL) {
+  if (window->hwnd) {
     DestroyWindow(window->hwnd);
   }
+#elif defined(_ZAP_X11)
+  XDestroyWindow(ZAP.xdisplay, window->xwindow);
 #endif
 }
 
 _ZAP_INTERNAL void _zap_window_center_on_screen(_zap_window_entry_t *window) {
-  assert(window != NULL);
+  assert(window);
   
   _zap_display_entry_t* display = _zap_window_get_display(window);
-  if (display != NULL) {
+  if (display) {
     int x = (display->rect.width - window->rect.width) / 2;
     int y = (display->rect.height - window->rect.height) / 2;
     _zap_window_move_to(window, x, y, window->rect.width, window->rect.height);
@@ -831,30 +875,38 @@ _ZAP_INTERNAL inline _zap_window_entry_t* _zap_findow_find(zap_window_t window) 
 }
 
 _ZAP_INTERNAL inline void _zap_window_refresh_size(_zap_window_entry_t* window) {
-  assert(window != NULL);
+  assert(window);
   zap_recti_t* rect = &window->rect;
 #if defined(_ZAP_WINDOWS)
   RECT winrect = {0};
-  if (window->hwnd != NULL && GetWindowRect(window->hwnd, &winrect)) {
+  if (window->hwnd && GetWindowRect(window->hwnd, &winrect)) {
     rect->x = winrect.left;
     rect->y = winrect.top;
     rect->width = winrect.right - winrect.left;
     rect->height = winrect.bottom - winrect.top;
   }
+#elif defined(_ZAP_X11)
+  XWindowAttributes attrs = {0};
+  XGetWindowAttributes(ZAP.xdisplay, window->xwindow, &attrs);
+  rect->x = attrs.x;
+  rect->y = attrs.y;
+  rect->width = attrs.width;
+  rect->height = attrs.height;
 #endif
 }
 
 _ZAP_INTERNAL _zap_display_entry_t* _zap_window_get_display(_zap_window_entry_t* window) {
   assert(ZAP.inited);
-  assert(window != NULL);
+  assert(window);
 
 #if defined(_ZAP_WINDOWS)
   assert(window->hwnd);
   HMONITOR hmonitor = MonitorFromWindow(window->hwnd, MONITOR_DEFAULTTOPRIMARY);
-  if (hmonitor == NULL) {
+  if (!hmonitor) {
     return NULL;
   }
 
+  // TODO use foreach macro
   for (size_t i = 0; i < ZAP.display_count; ++i) {
     _zap_display_entry_t* it = &ZAP.displays[i];
     if (it->hmonitor == hmonitor) {
@@ -866,8 +918,46 @@ _ZAP_INTERNAL _zap_display_entry_t* _zap_window_get_display(_zap_window_entry_t*
   return NULL;
 }
 
+_ZAP_INTERNAL void _zap_display_destroy(_zap_display_entry_t* display) {
+  if (display == NULL) {
+    return;
+  }
+
 #if defined(_ZAP_WINDOWS)
-_ZAP_INTERNAL void _zap_windows_init(void) {
+  // TODO - free hmonitor
+#elif defined(_ZAP_X11)
+  if (display->x11_display_name) {
+    free(display->x11_display_name);
+    display->x11_display_name = NULL;
+  }
+#endif
+}
+
+#if defined(_ZAP_WINDOWS)
+_ZAP_INTERNAL bool _zap_windows_init(void) {
+  HINSTANCE hinstance = GetModuleHandle(NULL);
+  if (!hinstance) {
+    return false;
+  }
+
+  WNDCLASSEX wndclass = {
+    .cbSize = sizeof(WNDCLASSEX),
+    .lpfnWndProc = ZapWndProc,
+    .hInstance = hinstance,
+    .lpszClassName = _ZAP_WINDOWS_WNDCLASS,
+    .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC
+    // .hIcon = LoadIcon(NULL, IDI_APPLICATION),
+    // .hIconSm = LoadIcon(NULL, IDI_APPLICATION),
+    // .hCursor = LoadCursor(NULL, IDC_ARROW),
+  };
+
+  if (!RegisterClassEx(&wndclass)) {
+    return false;
+  }
+
+  ZAP.hinstance = hinstance;
+  ZAP.wndclass = wndclass;
+
   ZAP.keycodes[0x00B] = ZAP_KEYCODE_0;
   ZAP.keycodes[0x002] = ZAP_KEYCODE_1;
   ZAP.keycodes[0x003] = ZAP_KEYCODE_2;
@@ -945,29 +1035,6 @@ _ZAP_INTERNAL void _zap_windows_init(void) {
   ZAP.keycodes[0x044] = ZAP_KEYCODE_F10;
   ZAP.keycodes[0x057] = ZAP_KEYCODE_F11;
   ZAP.keycodes[0x058] = ZAP_KEYCODE_F12;
-  ZAP.keycodes[0x064] = ZAP_KEYCODE_F13;
-  ZAP.keycodes[0x065] = ZAP_KEYCODE_F14;
-  ZAP.keycodes[0x066] = ZAP_KEYCODE_F15;
-  ZAP.keycodes[0x067] = ZAP_KEYCODE_F16;
-  ZAP.keycodes[0x068] = ZAP_KEYCODE_F17;
-  ZAP.keycodes[0x069] = ZAP_KEYCODE_F18;
-  ZAP.keycodes[0x06A] = ZAP_KEYCODE_F19;
-  ZAP.keycodes[0x06B] = ZAP_KEYCODE_F20;
-  ZAP.keycodes[0x06C] = ZAP_KEYCODE_F21;
-  ZAP.keycodes[0x06D] = ZAP_KEYCODE_F22;
-  ZAP.keycodes[0x06E] = ZAP_KEYCODE_F23;
-  ZAP.keycodes[0x076] = ZAP_KEYCODE_F24;
-  ZAP.keycodes[0x038] = ZAP_KEYCODE_LEFT_ALT;
-  ZAP.keycodes[0x01D] = ZAP_KEYCODE_LEFT_CONTROL;
-  ZAP.keycodes[0x02A] = ZAP_KEYCODE_LEFT_SHIFT;
-  ZAP.keycodes[0x15B] = ZAP_KEYCODE_LEFT_SUPER;
-  ZAP.keycodes[0x137] = ZAP_KEYCODE_PRINT_SCREEN;
-  ZAP.keycodes[0x138] = ZAP_KEYCODE_RIGHT_ALT;
-  ZAP.keycodes[0x11D] = ZAP_KEYCODE_RIGHT_CONTROL;
-  ZAP.keycodes[0x036] = ZAP_KEYCODE_RIGHT_SHIFT;
-  ZAP.keycodes[0x136] = ZAP_KEYCODE_RIGHT_SHIFT;
-  ZAP.keycodes[0x15C] = ZAP_KEYCODE_RIGHT_SUPER;
-  ZAP.keycodes[0x150] = ZAP_KEYCODE_DOWN;
   ZAP.keycodes[0x14B] = ZAP_KEYCODE_LEFT;
   ZAP.keycodes[0x14D] = ZAP_KEYCODE_RIGHT;
   ZAP.keycodes[0x148] = ZAP_KEYCODE_UP;
@@ -1020,7 +1087,7 @@ LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_MOVE: {
       // TODO(performance) - run a timer to run this refresh method
       _zap_window_entry_t* window = _zap_findow_find(window_id);
-      if (window != NULL) {
+      if (window) {
         _zap_window_refresh_size(window);
 
         ZAP.on_event((zap_event_t) {
@@ -1036,7 +1103,7 @@ LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     case WM_DROPFILES: {
       HDROP hdrop = (HDROP)wparam;
-      if (hdrop != NULL) {
+      if (hdrop) {
         ZAP.on_event((zap_event_t) {
           .type = ZAP_EVENT_FILE_DROP_STARTED,
           .window = window_id,
@@ -1069,7 +1136,7 @@ LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     case WM_KEYUP:
     case WM_KEYDOWN: {
-      if (ZAP.on_event != NULL) {
+      if (ZAP.on_event) {
         zap_keycode_t keycode = ZAP.keycodes[HIWORD(lparam) & 0x1FF];
         if (keycode) {
           bool is_repeat = msg == WM_KEYDOWN ? (lparam & 0xFF) > 0 : false;
@@ -1095,6 +1162,7 @@ BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprec
 
   _zap_display_entry_t* entry = NULL;
 
+  // TODO use foreach macro
   for (size_t i = 0; i < ZAP.display_count; ++i) {
     _zap_display_entry_t* it = &ZAP.displays[i];
     if (it->hmonitor == hmonitor) {
@@ -1103,7 +1171,7 @@ BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprec
     }
   }
 
-  if (entry == NULL) {
+  if (!entry) {
     if (ZAP.display_count >= ZAP.display_cap) {
       while (ZAP.display_count >= ZAP.display_cap) {
         ZAP.display_cap *= 2;
@@ -1120,7 +1188,7 @@ BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprec
     ZAP.display_count += 1;
   }
 
-  if (lprect != NULL) {
+  if (lprect) {
     zap_recti_t* rect = &entry->rect;
     rect->x = lprect->left;
     rect->y = lprect->top;
@@ -1130,32 +1198,164 @@ BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprec
 
   return true;
 }
+#elif defined(_ZAP_X11)
+_ZAP_INTERNAL bool _zap_x11_init(void) {
+  Display* display = XOpenDisplay(NULL);
+  if (!display) {
+    return false;
+  }
 
-#undef ZAP_IMPL
-#endif
+  ZAP.xdisplay = display;
+  ZAP.xroot_window = XDefaultRootWindow(display);
+  ZAP.xa_wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", false);
+  ZAP.xa_window_id = XInternAtom(display, "ZAP_WINDOW_USER_DATA", false);
 
-#if defined(_ZAP_X11)
-_ZAP_INTERNAL bool _zap_x11_handle_events(void) {
+  // TODO implement this -- reference: https://github.com/floooh/sokol/blob/master/sokol_app.h#L10045
+
+  return true;
+}
+
+_ZAP_INTERNAL void _zap_x11_handle_events(void) {
   XEvent xevent = {0};
   while (XPending(ZAP.xdisplay)) {
     XNextEvent(ZAP.xdisplay, &xevent);
 
     switch(xevent.type) {
       case ClientMessage: {
-        if (xevent.xclient.data.l[0] == ZAP.xwm_delete_window) {
-          for (size_t i = 0; i < ZAP.window_count; ++i) {
-            ZAPWindow* window = &ZAP.windows[i];
-            if (window->xwindow == xevent.xclient.window) {
-              ids_to_close[num_pending_close++] = window->id;
-            }
-          }
+        Atom msg_atom = (Atom)xevent.xclient.data.l[0];
+        if (msg_atom == ZAP.xa_wm_delete_window) {
+          zap_window_request_close(_zap_x11_get_window(xevent.xclient.window));
         }
+
+        // TODO: handle this
+        // if (xevent.xclient.data.l[0] == ZAP.xwm_delete_window) {
+        //   for (size_t i = 0; i < ZAP.window_count; ++i) {
+        //     ZAPWindow* window = &ZAP.windows[i];
+        //     if (window->xwindow == xevent.xclient.window) {
+        //       ids_to_close[num_pending_close++] = window->id;
+        //     }
+        //   }
+        // }
       } break;
     }
   }
 }
-#endif
 
-#endif
+_ZAP_INTERNAL bool _zap_x11_refresh_displays(void) {
+  XRRScreenResources* resources = XRRGetScreenResources(ZAP.xdisplay, ZAP.xroot_window);
+  if (!resources) {
+    return false;
+  }
+
+  for (int i = 0; i < resources->noutput; ++i) {
+    RROutput output = resources->outputs[i];
+    XRROutputInfo* output_info = XRRGetOutputInfo(ZAP.xdisplay, resources, output);
+    if (!output_info) {
+      XRRFreeScreenResources(resources);
+      return false;
+    }
+
+    if (output_info->connection == RR_Connected && output_info->crtc) {
+      XRRCrtcInfo* crtc_info = XRRGetCrtcInfo(ZAP.xdisplay, resources, output_info->crtc);
+      if (!crtc_info) {
+        continue;
+      }
+
+      _zap_x11_upsert_display(output_info, crtc_info);
+
+      XRRFreeCrtcInfo(crtc_info);
+    }
+
+    XRRFreeOutputInfo(output_info);
+  }
+
+  XRRFreeScreenResources(resources);
+
+  return true;
+}
+
+_ZAP_INTERNAL void _zap_x11_upsert_display(XRROutputInfo* output_info, XRRCrtcInfo* crtc_info) {
+  assert(output_info);
+  assert(crtc_info);
+
+  _zap_display_entry_t* entry = NULL;
+
+  _ZAP_DISPLAYS_FOREACH({
+    if (strcmp(it->x11_display_name, output_info->name) == 0) {
+      entry = it;
+      break;
+    }
+  });
+
+  if (!entry) {
+    if (ZAP.display_count >= ZAP.display_cap) {
+      while (ZAP.display_count >= ZAP.display_cap) {
+        ZAP.display_cap *= 2;
+      }
+      ZAP.displays = (_zap_display_entry_t*)realloc(ZAP.displays, sizeof(_zap_display_entry_t) * ZAP.display_cap);
+    }
+
+    char* x11_display_name = (char*)malloc(sizeof(char) * output_info->nameLen);
+    strncpy(x11_display_name, output_info->name, output_info->nameLen);
+
+    ZAP.display_count += 1;
+    ZAP.displays[ZAP.display_count] = (_zap_display_entry_t) {
+      .id = ZAP.next_display_id,
+      .x11_display_name = x11_display_name,
+    };
+    entry = &ZAP.displays[ZAP.display_count];
+    ZAP.display_count += 1;
+  }
+
+  zap_recti_t* rect = &entry->rect;
+  rect->x = crtc_info->x;
+  rect->y = crtc_info->y;
+  rect->width = crtc_info->width;
+  rect->height = crtc_info->height;
+}
+
+_ZAP_INTERNAL zap_window_t _zap_x11_get_window(Window window) {
+  Atom actual_type;
+  int actual_format;
+  size_t n_items;
+  size_t bytes_after;
+  unsigned char* data = NULL;
+
+  if (XGetWindowProperty(
+    ZAP.xdisplay,
+    window,
+    ZAP.xa_window_id,
+    0,
+    1,
+    false,
+    XA_INTEGER,
+    &actual_type,
+    &actual_format,
+    &n_items,
+    &bytes_after,
+    &data
+  ) == Success) {
+    Window result = (Window)*data;
+    free(data);
+    return result;
+  }
+
+  return 0;
+}
+
+_ZAP_INTERNAL _zap_window_entry_t* _zap_x11_find_window_entry(Window window) {
+  // TODO make this more efficient
+  _ZAP_WINDOWS_FOREACH({
+    if (it->xwindow == window) {
+      return it;
+    }
+  });
+  return NULL;
+}
+
+#endif // _ZAP_X11
+
+#undef ZAP_IMPL
+#endif // ZAP_IMPL
 
 #endif // _ZAP_H_
