@@ -17,9 +17,15 @@
   #include <X11/Xutil.h>
   #include <X11/keysymdef.h>
   #include <X11/extensions/Xrandr.h>
+#elif defined(__APPLE__)
+  #define _ZAP_MACOS
+
+  #include <Cocoa/Cocoa.h>
 #endif
 
 // User and built-in defines
+#define ZAP_TICKS_PER_SECOND 1000000
+
 #ifndef ZAP_API
   #define ZAP_API
 #endif
@@ -47,6 +53,7 @@ typedef struct zap_window_options_t zap_window_options_t;
 // API - Typedefs and defines
 typedef uint32_t zap_window_t;
 typedef uint32_t zap_display_t;
+typedef uint64_t zap_tick_t;
 
 typedef enum zap_window_display_mode_t {
   ZAP_DISPLAY_MODE_INVALID = -1,
@@ -220,6 +227,13 @@ typedef enum zap_mbutton_t {
   ZAP_MBUTTON_MIDDLE = (1 << 3),
 } zap_mbutton_t;
 
+typedef struct {
+  int x;
+  int y;
+  int width;
+  int height;
+} zap_recti_t;
+
 typedef struct zap_event_t {
   zap_event_type_t type;
   zap_window_t window;
@@ -229,12 +243,19 @@ typedef struct zap_event_t {
   const char* filename;
 } zap_event_t;
 
+typedef struct zap_display_info_t {
+  zap_display_t id;
+  zap_window_display_mode_t display_mode;
+  zap_recti_t rect;
+  uint32_t refresh_rate;
+} zap_display_info_t;
+
 typedef bool (*ZapInitCallback)(zap_options_t options);
 typedef bool (*ZapDestroyCallback)(void);
 typedef void (*ZapEventCallback)(zap_event_t event);
 
 typedef void (*ZapWindowCreateCallback)(zap_window_t window, zap_window_options_t options);
-typedef void (*ZapWindowRenderCallback)(zap_window_t window, float delta);
+typedef void (*ZapWindowUpdateCallback)(zap_window_t window);
 typedef bool (*ZapWindowCloseCallback)(zap_window_t window);
 typedef void (*ZapWindowDestroyCallback)(zap_window_t window);
 
@@ -255,7 +276,7 @@ typedef struct zap_window_options_t {
   char* title;
   void* user_data;
   ZapWindowCreateCallback on_after_create;
-  ZapWindowRenderCallback on_render;
+  ZapWindowUpdateCallback on_update;
   ZapWindowCloseCallback on_before_close;
   ZapWindowDestroyCallback on_before_destroy;
 } zap_window_options_t;
@@ -264,7 +285,9 @@ typedef struct zap_window_options_t {
 ZAP_API char* zap_get_last_error(void);
 
 ZAP_API int zap_main(int argc, const char** argv, zap_options_t options);
-ZAP_API uint64_t zap_get_ticks(void);
+
+// Returns the time elapsed since zap was initialized in microseconds.
+ZAP_API zap_tick_t zap_get_ticks(void);
 
 ZAP_API bool zap_init(zap_options_t options);
 ZAP_API void zap_destroy(void);
@@ -274,16 +297,18 @@ ZAP_API void zap_request_exit(void);
 ZAP_API void zap_set_user_data(void* user_data);
 ZAP_API void* zap_get_user_data(void);
 
-ZAP_API zap_display_t zap_get_primary_display(void);
+ZAP_API zap_display_t zap_display_get_primary(void);
+ZAP_API bool zap_display_get_info(zap_display_t display, zap_display_info_t* pinfo);
 
 ZAP_API zap_window_t zap_window_create(zap_window_options_t options);
 ZAP_API zap_window_display_mode_t zap_window_get_display_mode(zap_window_t window);
 ZAP_API void zap_window_set_display_mode(zap_window_t window, zap_window_display_mode_t display_mode);
 ZAP_API void zap_window_center_on_screen(zap_window_t window);
 ZAP_API void zap_window_request_close(zap_window_t window);
+ZAP_API void zap_window_set_title(zap_window_t window, const char* new_title, size_t len);
 ZAP_API zap_display_t zap_window_get_display(zap_window_t window);
-ZAP_API void zap_window_get_position(zap_window_t window, int* x, int* y);
-ZAP_API void zap_window_get_size(zap_window_t window, int* width, int* height);
+ZAP_API bool zap_window_get_position(zap_window_t window, int* x, int* y);
+ZAP_API bool zap_window_get_size(zap_window_t window, int* width, int* height);
 
 ZAP_API void zap_window_set_user_data(zap_window_t window, void* user_data);
 ZAP_API void* zap_window_get_user_data(zap_window_t window);
@@ -318,13 +343,6 @@ ZAP_API HWND zap_window_get_hwnd(zap_window_t window);
   } while (0)
 
 typedef struct {
-  int x;
-  int y;
-  int width;
-  int height;
-} zap_recti_t;
-
-typedef struct {
   zap_window_t id;
   zap_recti_t rect;
   zap_recti_t previous_rect;
@@ -334,21 +352,24 @@ typedef struct {
   HWND hwnd;
 #elif defined(_ZAP_X11)
   Window xwindow;
+#elif defined(_ZAP_MACOS)
+  NSWindow* nswindow;
 #endif
   ZapWindowCreateCallback on_after_create;
-  ZapWindowRenderCallback on_render;
+  ZapWindowUpdateCallback on_update;
   ZapWindowCloseCallback on_before_close;
   ZapWindowDestroyCallback on_before_destroy;
   void* user_data;
 } _zap_window_entry_t;
 
 typedef struct _zap_display_entry_t {
-  zap_display_t id;
-  zap_recti_t rect;
+  zap_display_info_t info;
 #if defined(_ZAP_WINDOWS)
-  HMONITOR hmonitor;
+  wchar_t win32_device_name[32];
 #elif defined(_ZAP_X11)
   char* x11_display_name;
+#elif defined(_ZAP_MACOS)
+  NSNumber* nsscreen_number;
 #endif
 } _zap_display_entry_t;
 
@@ -368,11 +389,16 @@ static struct ZAP {
 #if defined(_ZAP_WINDOWS)
   HINSTANCE hinstance;
   WNDCLASSEX wndclass;
+  LARGE_INTEGER qpstart;
+  LARGE_INTEGER qpfreq;
 #elif defined(_ZAP_X11)
   Atom xa_wm_delete_window;
   Atom xa_window_id;
   Window xroot_window;
   Display* xdisplay;
+#elif defined(_ZAP_MACOS)
+  NSAutoreleasePool* nspool;
+  NSApplication* nsapp;
 #endif
 
   zap_keycode_t keycodes[512];
@@ -390,15 +416,17 @@ _ZAP_INTERNAL void _zap_window_destroy(_zap_window_entry_t* window);
 _ZAP_INTERNAL void _zap_window_move_to(_zap_window_entry_t* window, int x, int y, int w, int h);
 _ZAP_INTERNAL void _zap_window_set_display_mode(_zap_window_entry_t* window, zap_window_display_mode_t display_mode);
 _ZAP_INTERNAL void _zap_window_center_on_screen(_zap_window_entry_t* window);
-_ZAP_INTERNAL inline _zap_window_entry_t* _zap_findow_find(zap_window_t id);
+_ZAP_INTERNAL inline _zap_window_entry_t* _zap_window_find(zap_window_t id);
 _ZAP_INTERNAL inline void _zap_window_refresh_size(_zap_window_entry_t* window);
 _ZAP_INTERNAL _zap_display_entry_t* _zap_window_get_display(_zap_window_entry_t* window);
 _ZAP_INTERNAL void _zap_display_destroy(_zap_display_entry_t* display);
+_ZAP_INTERNAL _zap_display_entry_t* _zap_display_append_new(void);
 
 #if defined(_ZAP_WINDOWS)
 _ZAP_INTERNAL bool _zap_windows_init(void);
 LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
-BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprect, LPARAM dwdata);
+_ZAP_INTERNAL bool _zap_windows_refresh_displays(void);
+_ZAP_INTERNAL bool _zap_windows_upsert_display(const DISPLAY_DEVICEW *display_device, const DEVMODEW *device_mode);
 #elif defined(_ZAP_X11)
 _ZAP_INTERNAL bool _zap_x11_init(void);
 _ZAP_INTERNAL void _zap_x11_handle_events(void);
@@ -406,6 +434,10 @@ _ZAP_INTERNAL bool _zap_x11_refresh_displays(void);
 _ZAP_INTERNAL void _zap_x11_upsert_display(XRROutputInfo* output_info, XRRCrtcInfo* crtc_info);
 _ZAP_INTERNAL zap_window_t _zap_x11_get_window(Window window);
 _ZAP_INTERNAL _zap_window_entry_t* _zap_x11_find_window_entry(Window window);
+#elif defined(_ZAP_MACOS)
+_ZAP_INTERNAL bool _zap_macos_init(void);
+_ZAP_INTERNAL void _zap_macos_destroy(void);
+_ZAP_INTERNAL bool _zap_macos_refresh_displays(void);
 #endif
 
 ZAP_API int zap_main(int argc, const char** argv, zap_options_t options) {
@@ -419,9 +451,15 @@ ZAP_API int zap_main(int argc, const char** argv, zap_options_t options) {
   return 0;
 }
 
-ZAP_API inline uint64_t zap_get_ticks(void) {
+ZAP_API zap_tick_t zap_get_ticks(void) {
 #if defined(_ZAP_WINDOWS)
-  return GetTickCount64();
+  LARGE_INTEGER ticks;
+  assert(QueryPerformanceCounter(&ticks));
+  LARGE_INTEGER elapsed;
+  elapsed.QuadPart = ticks.QuadPart - ZAP.qpstart.QuadPart;
+  elapsed.QuadPart *= ZAP_TICKS_PER_SECOND;
+  elapsed.QuadPart /= ZAP.qpfreq.QuadPart;
+  return elapsed.QuadPart;
 #endif
   return 0;
 }
@@ -429,6 +467,10 @@ ZAP_API inline uint64_t zap_get_ticks(void) {
 ZAP_API bool zap_init(zap_options_t options) {
   if (ZAP.inited) {
     return false;
+  }
+
+  if (options.user_data) {
+    ZAP.user_data = options.user_data;
   }
 
   ZAP.on_before_destroy = options.on_before_destroy;
@@ -450,6 +492,10 @@ ZAP_API bool zap_init(zap_options_t options) {
   }
 #elif defined(_ZAP_X11)
   if (!_zap_x11_init()) {
+    return false;
+  }
+#elif defined(_ZAP_MACOS)
+  if (!_zap_macos_init()) {
     return false;
   }
 #endif
@@ -517,6 +563,12 @@ ZAP_API void zap_run_loop(void) {
     }
 #endif
 
+    _ZAP_WINDOWS_FOREACH({
+      if (it->on_update) {
+        it->on_update(it->id);
+      }
+    });
+
     _zap_close_pending_windows();
   }
 }
@@ -535,6 +587,23 @@ ZAP_API void* zap_get_user_data(void) {
   return ZAP.user_data;
 }
 
+ZAP_API zap_display_t zap_display_get_primary(void) {
+  if (!ZAP.primary_display) {
+    return 0;
+  }
+  return ZAP.primary_display->info.id;
+}
+
+ZAP_API bool zap_display_get_info(zap_display_t display, zap_display_info_t* pinfo) {
+  _ZAP_DISPLAYS_FOREACH({
+    if (it->info.id == display) {
+      *pinfo = it->info;
+      return true;
+    };
+  });
+  return false;
+}
+
 ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
   _zap_window_entry_t window = {
     .id = ZAP.next_window_id,
@@ -543,13 +612,13 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
       .height = options.height,
     },
     .on_after_create = options.on_after_create,
-    .on_render = options.on_render,
+    .on_update = options.on_update,
     .on_before_close = options.on_before_close,
     .on_before_destroy = options.on_before_destroy,
     .user_data = options.user_data,
   };
 
-  char* title = options.title ? (char*)"zap" : options.title;
+  char* title = options.title ? options.title : (char*)"zap";
 
 #if defined(_ZAP_WINDOWS)
   assert(ZAP.hinstance);
@@ -619,7 +688,23 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
   );
 
   XFlush(ZAP.xdisplay);
+#elif defined(_ZAP_MACOS)
+  NSWindow* nswindow = [[NSWindow alloc]
+      initWithContentRect:NSZeroRect
+      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView)
+      backing:NSBackingStoreBuffered
+      defer:false
+  ];
+  if (!nswindow) {
+    return false;
+  }
 
+  @autoreleasepool {
+    NSString* titlestr = [NSString stringWithUTF8String:title];
+    [nswindow setTitle:titlestr];
+  }
+
+  window.nswindow = nswindow;
 #endif
 
   if (ZAP.window_count >= ZAP.window_cap) {
@@ -672,13 +757,15 @@ ZAP_API zap_window_t zap_window_create(zap_window_options_t options) {
   DragAcceptFiles(hwnd, TRUE);
 #elif defined(_ZAP_X11)
   XMapWindow(ZAP.xdisplay, xwindow);
+#elif defined(_ZAP_MACOS)
+  [nswindow makeKeyAndOrderFront:NULL];
 #endif
 
   return window.id;
 }
 
 ZAP_API zap_window_display_mode_t zap_window_get_display_mode(zap_window_t window) {
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
   if (!win) {
     return ZAP_DISPLAY_MODE_INVALID;
   }
@@ -686,7 +773,7 @@ ZAP_API zap_window_display_mode_t zap_window_get_display_mode(zap_window_t windo
 }
 
 ZAP_API void zap_window_set_display_mode(zap_window_t window, zap_window_display_mode_t display_mode) {
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
   if (win) {
     _zap_window_set_display_mode(win, display_mode);
   }
@@ -694,7 +781,7 @@ ZAP_API void zap_window_set_display_mode(zap_window_t window, zap_window_display
 
 
 ZAP_API void zap_window_center_on_screen(zap_window_t window) {
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
   if (win) {
     _zap_window_center_on_screen(win);
   }
@@ -702,7 +789,7 @@ ZAP_API void zap_window_center_on_screen(zap_window_t window) {
 
 ZAP_API void zap_window_request_close(zap_window_t window) {
   assert(window != 0);
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
 
   if (!win || win->close_requested) {
     return;
@@ -715,15 +802,59 @@ ZAP_API void zap_window_request_close(zap_window_t window) {
   win->close_requested = true;
 }
 
+ZAP_API void zap_window_set_title(zap_window_t window, const char* new_title, size_t len) {
+  char* buf = (char*)malloc(sizeof(char) * len + 1);
+#if defined(_ZAP_WINDOWS)
+  strncpy_s(buf, sizeof(char) * (len + 1), new_title, len);
+  SetWindowTextW(zap_window_get_hwnd(window), TEXT((const unsigned short*) buf));
+#endif
+  free(buf);
+}
+
+ZAP_API zap_display_t zap_window_get_display(zap_window_t window) {
+  (void)window;
+  _zap_window_entry_t* entry = _zap_window_find(window);
+  if (!entry) {
+    return 0;
+  }
+
+  _zap_display_entry_t* display = _zap_window_get_display(entry);
+  if (!display) {
+    return 0;
+  }
+
+  return display->info.id;
+}
+
+ZAP_API bool zap_window_get_position(zap_window_t window, int* x, int* y) {
+  _zap_window_entry_t* win = _zap_window_find(window);
+  if (win) {
+    *x = win->rect.x;
+    *y = win->rect.y;
+    return true;
+  }
+  return false;
+}
+
+ZAP_API bool zap_window_get_size(zap_window_t window, int* width, int* height) {
+  _zap_window_entry_t* win = _zap_window_find(window);
+  if (win) {
+    *width = win->rect.width;
+    *height = win->rect.height;
+    return true;
+  }
+  return false;
+}
+
 ZAP_API void zap_window_set_user_data(zap_window_t window, void* user_data) {
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
   if (win) {
     win->user_data = user_data;
   }
 }
 
 ZAP_API void* zap_window_get_user_data(zap_window_t window) {
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
   if (!win) {
     return NULL;
   }
@@ -732,7 +863,7 @@ ZAP_API void* zap_window_get_user_data(zap_window_t window) {
 
 #if defined(_ZAP_WINDOWS)
 ZAP_API HWND zap_window_get_hwnd(zap_window_t window) {
-  _zap_window_entry_t* win = _zap_findow_find(window);
+  _zap_window_entry_t* win = _zap_window_find(window);
   return !win ? NULL : win->hwnd;
 }
 #endif
@@ -758,6 +889,17 @@ _ZAP_INTERNAL void _zap_window_move_to(_zap_window_entry_t* window, int x, int y
 #elif defined(_ZAP_X11)
   assert(ZAP.xdisplay);
   XMoveResizeWindow(ZAP.xdisplay, window->xwindow, x, y, w, h);
+#elif defined(_ZAP_MACOS)
+  NSPoint nspos = {
+    .x = x,
+    .y = y,
+  };
+  NSSize nssize = {
+    .width = w,
+    .height = h,
+  };
+  [window->nswindow setFrameTopLeftPoint:nspos];
+  [window->nswindow setContentSize:nssize];
 #endif
 }
 
@@ -780,7 +922,8 @@ _ZAP_INTERNAL void _zap_window_set_display_mode(_zap_window_entry_t* window, zap
 #if defined(_ZAP_WINDOWS)
       if (window->hwnd) {
         SetWindowLong(window->hwnd, GWL_STYLE, 0);
-        SetWindowPos(window->hwnd, HWND_TOP, display->rect.x, display->rect.y, display->rect.width, display->rect.height, SWP_FRAMECHANGED);
+        zap_recti_t display_rect = display->info.rect;
+        SetWindowPos(window->hwnd, HWND_TOP, display_rect.x, display_rect.y, display_rect.width, display_rect.height, SWP_FRAMECHANGED);
       }
 #endif
     } break;
@@ -819,19 +962,18 @@ _ZAP_INTERNAL bool _zap_refresh_displays(void) {
   assert(ZAP.displays);
 
 #if defined(_ZAP_WINDOWS)
-  if (!EnumDisplayMonitors(NULL, NULL, ZapMonitorEnumProc, 0)) {
+  if (!_zap_windows_refresh_displays()) {
     return false;
   }
 #elif defined(_ZAP_X11)
   if (!_zap_x11_refresh_displays()) {
     return false;
   }
-#endif
-
-  // TODO: find a better way to select the primary display
-  if (ZAP.display_count > 0) {
-    ZAP.primary_display = &ZAP.displays[0];
+#elif defined(_ZAP_MACOS)
+  if (!_zap_macos_refresh_displays()) {
+    return false;
   }
+#endif
 
   return true;
 }
@@ -856,16 +998,23 @@ _ZAP_INTERNAL void _zap_window_destroy(_zap_window_entry_t* window) {
 
 _ZAP_INTERNAL void _zap_window_center_on_screen(_zap_window_entry_t *window) {
   assert(window);
-  
+
+#if defined(_ZAP_MACOS)
+  if (window->nswindow) {
+    [window->nswindow center];
+  }
+  return;
+#endif
+
   _zap_display_entry_t* display = _zap_window_get_display(window);
   if (display) {
-    int x = (display->rect.width - window->rect.width) / 2;
-    int y = (display->rect.height - window->rect.height) / 2;
+    int x = (display->info.rect.width - window->rect.width) / 2;
+    int y = (display->info.rect.height - window->rect.height) / 2;
     _zap_window_move_to(window, x, y, window->rect.width, window->rect.height);
   }
 }
 
-_ZAP_INTERNAL inline _zap_window_entry_t* _zap_findow_find(zap_window_t window) {
+_ZAP_INTERNAL inline _zap_window_entry_t* _zap_window_find(zap_window_t window) {
   _ZAP_WINDOWS_FOREACH({
     if (it->id == window) {
       return it;
@@ -892,6 +1041,12 @@ _ZAP_INTERNAL inline void _zap_window_refresh_size(_zap_window_entry_t* window) 
   rect->y = attrs.y;
   rect->width = attrs.width;
   rect->height = attrs.height;
+#elif defined(_ZAP_MACOS)
+  NSRect nsrect = window->nswindow.frame;
+  rect->x = nsrect.origin.x;
+  rect->y = nsrect.origin.y;
+  rect->width = nsrect.size.width;
+  rect->height = nsrect.size.height;
 #endif
 }
 
@@ -899,21 +1054,18 @@ _ZAP_INTERNAL _zap_display_entry_t* _zap_window_get_display(_zap_window_entry_t*
   assert(ZAP.inited);
   assert(window);
 
-#if defined(_ZAP_WINDOWS)
-  assert(window->hwnd);
-  HMONITOR hmonitor = MonitorFromWindow(window->hwnd, MONITOR_DEFAULTTOPRIMARY);
-  if (!hmonitor) {
-    return NULL;
-  }
+  int x = window->rect.x;
+  int y = window->rect.y;
 
-  // TODO use foreach macro
-  for (size_t i = 0; i < ZAP.display_count; ++i) {
-    _zap_display_entry_t* it = &ZAP.displays[i];
-    if (it->hmonitor == hmonitor) {
+  _ZAP_DISPLAYS_FOREACH({
+    zap_recti_t rect = it->info.rect;
+    if (
+      rect.x <= x && x <= (rect.x + rect.width) &&
+      rect.y <= y && y <= (rect.y + rect.height)
+    ) {
       return it;
     }
-  }
-#endif
+  });
 
   return NULL;
 }
@@ -923,15 +1075,32 @@ _ZAP_INTERNAL void _zap_display_destroy(_zap_display_entry_t* display) {
     return;
   }
 
-#if defined(_ZAP_WINDOWS)
-  // TODO - free hmonitor
-#elif defined(_ZAP_X11)
+#if defined(_ZAP_X11)
   if (display->x11_display_name) {
     free(display->x11_display_name);
     display->x11_display_name = NULL;
   }
 #endif
 }
+
+_ZAP_INTERNAL _zap_display_entry_t* _zap_display_append_new(void) {
+  if (ZAP.display_count >= ZAP.display_cap) {
+    while (ZAP.display_count >= ZAP.display_cap) {
+      ZAP.display_cap *= 2;
+    }
+    ZAP.displays = realloc(ZAP.displays, sizeof(_zap_display_entry_t) * ZAP.display_cap);
+  }
+
+  ZAP.displays[ZAP.display_count] = (_zap_display_entry_t) {
+    .info = {
+      .id = ZAP.next_display_id,
+    },
+  };
+  _zap_display_entry_t* entry = &ZAP.displays[ZAP.display_count];
+  ZAP.display_count += 1;
+  return entry;
+}
+
 
 #if defined(_ZAP_WINDOWS)
 _ZAP_INTERNAL bool _zap_windows_init(void) {
@@ -952,6 +1121,14 @@ _ZAP_INTERNAL bool _zap_windows_init(void) {
   };
 
   if (!RegisterClassEx(&wndclass)) {
+    return false;
+  }
+
+  if (!QueryPerformanceFrequency(&ZAP.qpfreq)) {
+    return false;
+  }
+
+  if (!QueryPerformanceCounter(&ZAP.qpstart)) {
     return false;
   }
 
@@ -1054,6 +1231,7 @@ _ZAP_INTERNAL bool _zap_windows_init(void) {
   ZAP.keycodes[0x11C] = ZAP_KEYCODE_KP_ENTER;
   ZAP.keycodes[0x037] = ZAP_KEYCODE_KP_MULTIPLY;
   ZAP.keycodes[0x04A] = ZAP_KEYCODE_KP_SUBTRACT;
+  return true;
 }
 
 _ZAP_INTERNAL zap_keymod_t _zap_windows_get_keymod(void) {
@@ -1086,7 +1264,7 @@ LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_SIZE:
     case WM_MOVE: {
       // TODO(performance) - run a timer to run this refresh method
-      _zap_window_entry_t* window = _zap_findow_find(window_id);
+      _zap_window_entry_t* window = _zap_window_find(window_id);
       if (window) {
         _zap_window_refresh_size(window);
 
@@ -1156,48 +1334,63 @@ LRESULT CALLBACK ZapWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
   return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
-BOOL CALLBACK ZapMonitorEnumProc(HMONITOR hmonitor, HDC hdcmonitor, LPRECT lprect, LPARAM dwdata) {
-  (void)hdcmonitor;
-  (void)dwdata;
+_ZAP_INTERNAL bool _zap_windows_refresh_displays(void) {
+  size_t idx = 0;
+  while (true) {
+    DISPLAY_DEVICEW display_device = {
+      .cb = sizeof(DISPLAY_DEVICEW),
+    };
+    if (!EnumDisplayDevicesW(NULL, idx, &display_device, EDD_GET_DEVICE_INTERFACE_NAME)) {
+      break;
+    }
+
+    DEVMODEW device_mode = {
+      .dmSize = sizeof(DEVMODEW),
+    };
+    if (!EnumDisplaySettingsExW(display_device.DeviceName, ENUM_REGISTRY_SETTINGS, &device_mode, EDS_RAWMODE)) {
+      break;
+    }
+
+    _zap_windows_upsert_display(&display_device, &device_mode);
+
+    idx += 1;
+  }
+
+  return idx > 0;
+}
+
+_ZAP_INTERNAL bool _zap_windows_upsert_display(const DISPLAY_DEVICEW *display_device, const DEVMODEW *device_mode) {
+  assert(display_device);
+  assert(device_mode);
 
   _zap_display_entry_t* entry = NULL;
-
-  // TODO use foreach macro
-  for (size_t i = 0; i < ZAP.display_count; ++i) {
-    _zap_display_entry_t* it = &ZAP.displays[i];
-    if (it->hmonitor == hmonitor) {
+  _ZAP_DISPLAYS_FOREACH({
+    if (wcscmp(it->win32_device_name, display_device->DeviceName) == 0) {
       entry = it;
       break;
     }
-  }
+  });
 
   if (!entry) {
-    if (ZAP.display_count >= ZAP.display_cap) {
-      while (ZAP.display_count >= ZAP.display_cap) {
-        ZAP.display_cap *= 2;
-      }
-      ZAP.displays = realloc(ZAP.displays, sizeof(_zap_display_entry_t) * ZAP.display_cap);
-    }
-
-    ZAP.display_count += 1;
-    ZAP.displays[ZAP.display_count] = (_zap_display_entry_t) {
-      .id = ZAP.next_display_id,
-      .hmonitor = hmonitor,
-    };
-    entry = &ZAP.displays[ZAP.display_count];
-    ZAP.display_count += 1;
+    entry = _zap_display_append_new();
+    wcscpy_s(entry->win32_device_name, 32, display_device->DeviceName);
   }
 
-  if (lprect) {
-    zap_recti_t* rect = &entry->rect;
-    rect->x = lprect->left;
-    rect->y = lprect->top;
-    rect->width = lprect->right - lprect->left;
-    rect->height = lprect->bottom - lprect->top;
+  zap_display_info_t* info = &entry->info;
+  zap_recti_t* rect = &info->rect;
+  rect->x = device_mode->dmPosition.x;
+  rect->x = device_mode->dmPosition.y;
+  rect->width = device_mode->dmPelsWidth;
+  rect->height = device_mode->dmPelsHeight;
+  info->refresh_rate = device_mode->dmDisplayFrequency;
+
+  if (display_device->StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) {
+    ZAP.primary_display = entry;
   }
 
   return true;
 }
+
 #elif defined(_ZAP_X11)
 _ZAP_INTERNAL bool _zap_x11_init(void) {
   Display* display = XOpenDisplay(NULL);
@@ -1354,6 +1547,70 @@ _ZAP_INTERNAL _zap_window_entry_t* _zap_x11_find_window_entry(Window window) {
 }
 
 #endif // _ZAP_X11
+
+#if defined(_ZAP_MACOS)
+_ZAP_INTERNAL bool _zap_macos_init(void) {
+  NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+  if (!pool) {
+    return false;
+  }
+  ZAP.nspool = pool;
+
+  NSApplication* app = [NSApplication sharedApplication];
+  if (!app) {
+    return false;
+  }
+  ZAP.nsapp = app;
+
+  return true;
+}
+
+_ZAP_INTERNAL void _zap_macos_destroy(void) {
+  if (ZAP.nsapp) {
+    [ZAP.nsapp terminate:0];
+    ZAP.nsapp = NULL;
+  }
+
+  if (ZAP.nspool) {
+    [ZAP.nspool release];
+    ZAP.nspool = NULL;
+  }
+}
+
+_ZAP_INTERNAL _zap_display_entry_t* _zap_macos_upsert_display(NSScreen* screen) {
+  _zap_display_entry_t* entry = NULL;
+  NSNumber* screen_number = [[screen deviceDescription] objectForKey:@"NSScreenNumber"];
+
+  _ZAP_DISPLAYS_FOREACH({
+    if ([it->nsscreen_number compare:screen_number] == 0) {
+      entry = it;
+      break;
+    }
+  });
+
+  if (!entry) {
+    entry = _zap_display_append_new();
+  }
+
+  NSRect nsrect = [screen frame];
+  entry->nsscreen_number = [screen_number copy];
+}
+
+_ZAP_INTERNAL bool _zap_macos_refresh_displays(void) {
+  @autoreleasepool {
+    id screens = [NSScreen screens];
+    for (size_t i = 0; i < [screens count]; ++i) {
+      id screen = [screens objectAtIndex:i];
+      _zap_display_entry_t* entry = _zap_macos_upsert_display(screen);
+      if (i == 0) {
+        ZAP.primary_display = entry;
+      }
+    }
+  }
+  return true;
+}
+
+#endif // _ZAP_MACOS
 
 #undef ZAP_IMPL
 #endif // ZAP_IMPL
